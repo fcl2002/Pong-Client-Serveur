@@ -87,7 +87,7 @@ Depuis la racine du projet :
 
 ```bash
 cd test
-gcc test.c ../server/core.c -o test
+gcc test.c ../server/game.c -o test
 ./test
 ```
 
