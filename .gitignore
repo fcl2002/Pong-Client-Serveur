@@ -1,1 +1,6 @@
 *.pdf
+*.bin
+*.exe
+*.out
+
+bin
