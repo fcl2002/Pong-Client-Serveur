@@ -1,20 +1,19 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <termios.h>
-#include <fcntl.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 #include "game.h"
 
 /* ================= Terminal Raw Mode ================= */
 
 static struct termios orig_termios;
 
-void disable_raw_mode() {
+static void disable_raw_mode(void) {
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
 }
 
-void enable_raw_mode() {
+static void enable_raw_mode(void) {
     tcgetattr(STDIN_FILENO, &orig_termios);
     atexit(disable_raw_mode);
 
@@ -26,26 +25,38 @@ void enable_raw_mode() {
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 }
 
-/* ================= Keyboard ================= */
+/* ================= Keyboard (non-blocking) ================= */
 
-int kbhit() {
-    int oldf = fcntl(STDIN_FILENO, F_GETFL);
-    fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
-
-    int ch = getchar();
-
-    fcntl(STDIN_FILENO, F_SETFL, oldf);
-
-    if (ch != EOF) {
-        ungetc(ch, stdin);
-        return 1;
-    }
-    return 0;
+static int read_key_nonblock(void) {
+    unsigned char c;
+    int n = read(STDIN_FILENO, &c, 1);
+    if (n == 1) return (int)c;
+    return -1;
 }
 
-int getch_noblock() {
-    if (!kbhit()) return -1;
-    return getchar();
+/* Returns:
+ *  - normal ASCII char (e.g. 'w', 's', 'q')
+ *  - special codes: 1001 = UP, 1002 = DOWN
+ *  - -1 if no key available
+ */
+#define KEY_UP   1001
+#define KEY_DOWN 1002
+
+static int read_key_decoded(void) {
+    int c = read_key_nonblock();
+    if (c == -1) return -1;
+
+    if (c == 27) { /* ESC */
+        int c1 = read_key_nonblock(); /* usually '[' */
+        int c2 = read_key_nonblock(); /* 'A' or 'B' */
+        if (c1 == '[') {
+            if (c2 == 'A') return KEY_UP;
+            if (c2 == 'B') return KEY_DOWN;
+        }
+        return -1; /* unknown escape sequence */
+    }
+
+    return c; /* normal key */
 }
 
 /* ================= Rendering ================= */
@@ -53,7 +64,7 @@ int getch_noblock() {
 #define TERM_W 80
 #define TERM_H 24
 
-void draw_game(const GameState *g) {
+static void draw_game(const GameState *g) {
     char screen[TERM_H][TERM_W + 1];
 
     for (int y = 0; y < TERM_H; y++) {
@@ -71,84 +82,89 @@ void draw_game(const GameState *g) {
         screen[y][TERM_W - 1] = '|';
     }
 
-    /* dashed center line */
-    for (int y = 1; y < TERM_H - 1; y += 2) {
+    /* center line */
+    for (int y = 1; y < TERM_H - 1; y += 2)
         screen[y][TERM_W / 2] = '|';
-    }
 
     /* score */
     char score[32];
     snprintf(score, sizeof(score), " %d : %d ", g->score_left, g->score_right);
     int start = (TERM_W - (int)strlen(score)) / 2;
-    for (int i = 0; score[i]; i++) {
+    for (int i = 0; score[i]; i++)
         screen[0][start + i] = score[i];
-    }
 
     /* logical -> screen scale */
     float sx = (TERM_W - 2) / g->field_w;
     float sy = (TERM_H - 2) / g->field_h;
 
     /* paddles */
-    int paddle_h = (int)(g->paddle_h * sy);
-    int px_left = 2;
-    int px_right = TERM_W - 3;
+    int ph = (int)(g->paddle_h * sy);
+    int pxL = 2;
+    int pxR = TERM_W - 3;
 
-    int py_left = (int)(g->paddle_left_y * sy);
-    int py_right = (int)(g->paddle_right_y * sy);
+    int pyL = (int)(g->paddle_left_y * sy);
+    int pyR = (int)(g->paddle_right_y * sy);
 
-    for (int i = -paddle_h / 2; i <= paddle_h / 2; i++) {
-        int y1 = py_left + i;
-        int y2 = py_right + i;
-        if (y1 > 0 && y1 < TERM_H - 1) screen[y1][px_left] = '#';
-        if (y2 > 0 && y2 < TERM_H - 1) screen[y2][px_right] = '#';
+    for (int i = -ph / 2; i <= ph / 2; i++) {
+        int yL = pyL + i;
+        int yR = pyR + i;
+        if (yL > 0 && yL < TERM_H - 1) screen[yL][pxL] = '#';
+        if (yR > 0 && yR < TERM_H - 1) screen[yR][pxR] = '#';
     }
 
     /* ball */
     int bx = (int)(g->ball_x * sx);
     int by = (int)(g->ball_y * sy);
-
-    if (bx > 0 && bx < TERM_W - 1 && by > 0 && by < TERM_H - 1) {
+    if (bx > 0 && bx < TERM_W - 1 && by > 0 && by < TERM_H - 1)
         screen[by][bx] = 'O';
-    }
 
-    /* clear + print */
     printf("\033[H\033[J");
-    for (int y = 0; y < TERM_H; y++) {
+    for (int y = 0; y < TERM_H; y++)
         printf("%s\n", screen[y]);
-    }
     fflush(stdout);
 }
 
 /* ================= Main ================= */
 
-int main() {
+int main(void) {
     GameState game;
     game_init(&game);
 
     enable_raw_mode();
 
     printf("PONG ASCII TEST\n");
-    printf("Controls: W/S = Left | Up/Down = Right | Q = Quit\n");
+    printf("Controls:\n");
+    printf("  Joueur gauche : W (haut) / S (bas)\n");
+    printf("  Joueur droite : Fleche Haut / Fleche Bas\n");
+    printf("  Q             : Quit\n");
     usleep(1000000);
 
+    int left_dir = 0;   /* -1 up, +1 down, 0 none */
+    int right_dir = 0;
+
     while (1) {
-        PlayerInput left = INPUT_NONE;
-        PlayerInput right = INPUT_NONE;
+        int key = read_key_decoded();
+        if (key != -1) {
+            if (key == 'q' || key == 'Q') break;
 
-        int ch = getch_noblock();
-        if (ch != -1) {
-            if (ch == 'q' || ch == 'Q') break;
+            /* Left paddle: W/S */
+            if (key == 'w' || key == 'W') left_dir = -1;
+            if (key == 's' || key == 'S') left_dir = +1;
 
-            if (ch == 'w' || ch == 'W') left = INPUT_UP;
-            if (ch == 's' || ch == 'S') left = INPUT_DOWN;
-
-            if (ch == 27) { /* escape sequence for arrows */
-                if (kbhit()) getchar(); /* skip '[' */
-                int dir = getchar();
-                if (dir == 'A') right = INPUT_UP;    /* up */
-                if (dir == 'B') right = INPUT_DOWN;  /* down */
-            }
+            /* Right paddle: arrow up/down */
+            if (key == KEY_UP)   right_dir = -1;
+            if (key == KEY_DOWN) right_dir = +1;
         }
+
+        PlayerInput left =
+            (left_dir < 0) ? INPUT_UP :
+            (left_dir > 0) ? INPUT_DOWN :
+            INPUT_NONE;
+
+        PlayerInput right =
+            (right_dir < 0) ? INPUT_UP :
+            (right_dir > 0) ? INPUT_DOWN :
+            INPUT_NONE;
 
         game_step(&game, left, right);
         draw_game(&game);
