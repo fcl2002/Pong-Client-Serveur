@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include "game.h"
+#include "../server/game.h"
 
 /* ================= Terminal Raw Mode ================= */
 

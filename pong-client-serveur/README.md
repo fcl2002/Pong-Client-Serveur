@@ -75,7 +75,23 @@ pong-client-server/
 
 ## ▶️ Exécution
 
-### Version TCP
+## 🧪 Exécution du fichier `test.c`
+
+Le fichier `test.c` est un programme de test permettant de vérifier le bon fonctionnement du cœur du jeu sans lancer le serveur.
+
+Il se trouve dans le dossier `/test` et utilise la logique du jeu située dans `/server`.
+
+### Compilation et exécution
+
+Depuis la racine du projet :
+
+```bash
+cd test
+gcc test.c ../server/core.c -o test
+./test
+```
+
+## Version TCP
 Lancer d’abord le serveur, puis les clients.
 
 ```bash
