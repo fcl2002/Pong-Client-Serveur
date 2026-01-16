@@ -1,24 +1,41 @@
-CC = gcc
-CFLAGS = -Wall -Wextra -std=c11
+CC      = gcc -w
+CFLAGS  = -Wall -Wextra -std=c11
 LDFLAGS = -lm
+
+BIN_DIR = bin
+
+SERVER_SRC = server/server_tcp.c server/game.c
+CLIENT_SRC = client/client_tcp.c
+
+SERVER_BIN = $(BIN_DIR)/server_tcp
+CLIENT_BIN = $(BIN_DIR)/client_tcp
+
+# Flags específicas
+CLIENT_CFLAGS = $(CFLAGS) -D_POSIX_C_SOURCE=200809L
+
+.PHONY: all server client run_server_tcp run_client_tcp clean re
 
 all: server client
 
-server:
-	mkdir -p bin
-	$(CC) $(CFLAGS) server/server_tcp.c server/game.c -o bin/server_tcp $(LDFLAGS)
+$(BIN_DIR):
+	mkdir -p $(BIN_DIR)
 
-client:
-	mkdir -p bin
-	$(CC) $(CFLAGS) client/client_tcp.c -o bin/client_tcp
+server: $(SERVER_BIN)
+client: $(CLIENT_BIN)
 
-run_server_tcp: server_tcp
-	./bin/server_tcp 8080
+$(SERVER_BIN): $(SERVER_SRC) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(SERVER_SRC) -o $(SERVER_BIN) $(LDFLAGS)
 
-run_client_tcp: client_tcp
-	./bin/client_tcp 127.0.0.1 8080
+$(CLIENT_BIN): $(CLIENT_SRC) | $(BIN_DIR)
+	$(CC) $(CLIENT_CFLAGS) $(CLIENT_SRC) -o $(CLIENT_BIN) $(LDFLAGS)
+
+run_server_tcp: $(SERVER_BIN)
+	./$(SERVER_BIN) 8080
+
+run_client_tcp: $(CLIENT_BIN)
+	./$(CLIENT_BIN) 127.0.0.1 8080
 
 clean:
-	rm -rf bin
+	rm -rf $(BIN_DIR)
 
 re: clean all
