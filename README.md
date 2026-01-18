@@ -95,17 +95,121 @@ Chaque client contrôle exclusivement sa propre raquette, utilisant les touches 
 
 ### 4.1. Vue d'Ensemble
 
-[Section à compléter par Matheus]
+L'implémentation UDP adopte également une architecture client-serveur autoritaire, mais avec des caractéristiques fondamentalement différentes du TCP. Contrairement au TCP qui établit une connexion persistante, l'UDP utilise un protocole sans connexion (connectionless) où chaque paquet est envoyé de manière indépendante sans garantie de livraison ou d'ordre.
+
+```
+┌──────────────┐                    ┌──────────────┐
+│   Client 1   │◄───── UDP ────────►│              │
+│  (Joueur 1)  │  (datagrams)       │   Serveur    │
+└──────────────┘                    │  Autoritaire │
+                                    │              │
+┌──────────────┐                    │   Port UDP   │
+│   Client 2   │◄───── UDP ────────►│    12345     │
+│  (Joueur 2)  │  (datagrams)       │              │
+└──────────────┘                    └──────────────┘
+```
+
+Cette architecture privilégie la **faible latence** et la **réactivité** au détriment de la garantie de livraison. Dans le contexte d'un jeu temps réel comme Pong, perdre occasionnellement un paquet d'état est acceptable puisque le prochain paquet contient l'état le plus récent qui rend l'ancien obsolète.
 
 ### 4.2. Composants du Système
 
 #### 4.2.1. Serveur UDP (server_udp.c)
 
-[Section à compléter par Matheus]
+Le serveur UDP maintient l'autorité sur l'état du jeu tout en gérant la communication non connectée avec les clients. Ses responsabilités incluent :
+
+- **Gestion des connexions non persistantes :** Identification des clients par leur adresse IP et port UDP, sans établissement de connexion formelle ;
+- **Attribution des rôles :** Assignation des Player IDs (0 et 1) basée sur l'ordre d'arrivée des premiers messages `MSG_CLIENT_CONNECT` ;
+- **Détection de timeout :** Surveillance des clients inactifs (pas de messages reçus pendant 5 secondes) et marquage comme déconnectés ;
+- **Réception des inputs :** Traitement des messages `MSG_CLIENT_INPUT` contenant les actions des joueurs ;
+- **Mise à jour de l'état :** Exécution de `game_step()` à 60 Hz uniquement lorsque les deux joueurs sont connectés ;
+- **Broadcast de l'état :** Envoi périodique de l'état complet via des datagrammes UDP à tous les clients actifs.
+
+**Mécanisme de démarrage du jeu :** Le serveur initialise la structure du jeu immédiatement, mais ne commence à exécuter la simulation (`game_step()`) que lorsque les deux joueurs sont connectés. Cette approche évite que le jeu progresse avec un seul joueur.
+
+**Gestion de la déconnexion :** Lorsqu'un joueur se déconnecte (message `MSG_CLIENT_DISCONNECT` ou timeout), le serveur :
+1. Marque le client comme inactif ;
+2. Arrête la simulation du jeu (`game_started = 0`) ;
+3. Continue d'envoyer des broadcasts à 10 Hz pour informer le joueur restant du statut de connexion.
+
+**Structure du message d'état :**
+```c
+typedef struct {
+    uint8_t type;              // MSG_SERVER_STATE
+    float ball_x;              // Position X de la balle
+    float ball_y;              // Position Y de la balle
+    float paddle_left_y;       // Position Y de la raquette gauche
+    float paddle_right_y;      // Position Y de la raquette droite
+    int score_left;            // Score du joueur gauche
+    int score_right;           // Score du joueur droit
+    uint32_t tick;             // Numéro du tick actuel
+    uint8_t player0_connected; // Statut de connexion du joueur 0
+    uint8_t player1_connected; // Statut de connexion du joueur 1
+} StateMsg;
+```
+
+L'inclusion des flags de connexion (`player0_connected`, `player1_connected`) permet aux clients d'afficher des messages informatifs lorsqu'un joueur se déconnecte.
 
 #### 4.2.2. Client UDP (client_udp.c)
 
-[Section à compléter par Matheus]
+Les clients UDP fonctionnent comme des terminaux légers qui capturent les entrées et affichent l'état du jeu sans maintenir de connexion persistante. Leurs fonctions sont :
+
+- **Communication sans connexion :** Envoi de datagrammes UDP au serveur sans établissement préalable de connexion ;
+- **Identification :** Transmission du Player ID (0 ou 1, défini via argument en ligne de commande) dans chaque message ;
+- **Capture d'entrée :** Lecture non-bloquante des commandes clavier (W/S) en mode raw via `termios` ;
+- **Envoi des inputs :** Transmission immédiate des actions via `MSG_CLIENT_INPUT` et envoi périodique de keepalive toutes les secondes ;
+- **Réception de l'état :** Traitement des datagrammes `MSG_SERVER_STATE` contenant l'état complet du jeu ;
+- **Rendu ASCII :** Visualisation du jeu dans le terminal avec représentation des raquettes, de la balle et du score ;
+- **Affichage du statut :** Indication visuelle lorsqu'un joueur est déconnecté ou en attente de connexion.
+
+**Gestion de la déconnexion :** Lorsque le joueur appuie sur 'Q', le client :
+1. Envoie un message `MSG_CLIENT_DISCONNECT` au serveur ;
+2. Ferme le socket UDP ;
+3. Restaure le mode normal du terminal ;
+4. Termine l'exécution proprement.
+
+**Rendu visuel :** Le client utilise des séquences ANSI pour effacer l'écran et repositionner le curseur, créant l'illusion d'animation. Les éléments sont dessinés dans un buffer de caractères avant d'être affichés d'un coup, évitant le flickering.
+
+**Absence de prédiction côté client :** Contrairement à l'implémentation TCP, la version UDP ne fait pas de client-side prediction. Cette décision est justifiée par :
+- La latence naturellement plus faible de l'UDP rend la prédiction moins nécessaire ;
+- La simplicité d'implémentation permet de mieux observer les caractéristiques natives du protocole ;
+- L'objectif pédagogique de comparer les deux protocoles dans leurs comportements bruts.
+
+### 4.3. Protocole de Communication
+
+Le protocole UDP personnalisé définit quatre types de messages :
+
+**MSG_CLIENT_CONNECT (1) :** Envoyé par le client au démarrage pour s'identifier au serveur.
+```c
+struct {
+    uint8_t type;      // 1
+    uint8_t player_id; // 0 ou 1
+}
+```
+
+**MSG_CLIENT_INPUT (2) :** Envoyé par le client pour communiquer les actions du joueur.
+```c
+struct {
+    uint8_t type;      // 2
+    uint8_t player_id; // 0 ou 1
+    uint8_t input;     // INPUT_NONE, INPUT_UP, INPUT_DOWN
+}
+```
+
+**MSG_SERVER_STATE (3) :** Broadcast du serveur contenant l'état complet du jeu (voir structure StateMsg ci-dessus).
+
+**MSG_CLIENT_DISCONNECT (4) :** Envoyé par le client lors de la fermeture propre.
+```c
+struct {
+    uint8_t type; // 4
+}
+```
+
+**Compromis de design :** Chaque message d'état contient l'état complet du jeu plutôt que des deltas (différences). Bien que cela consomme plus de bande passante (environ 50 octets par paquet), cette approche :
+- Garantit que chaque paquet est auto-suffisant ;
+- Élimine le besoin de reconstruction d'état en cas de perte de paquets ;
+- Simplifie l'implémentation et améliore la robustesse.
+
+Pour un jeu Pong à 60 Hz avec 2 clients, cela représente environ 6 KB/s par client, ce qui est négligeable pour les réseaux modernes.
 
 ---
 
@@ -153,7 +257,40 @@ Cette approche résulte en une expérience plus fluide, où le joueur sent que s
 
 ## 6. Défis de Latence et Solutions Implémentées - UDP
 
-[Section à compléter par Matheus]
+### 6.1. Problème : Perte de Paquets et Ordre Non Garanti
+
+L'utilisation du protocole UDP introduit des défis spécifiques dus à sa nature non fiable :
+
+- **Perte de paquets :** Les datagrammes peuvent être perdus sans notification ni retransmission ;
+- **Ordre non garanti :** Les paquets peuvent arriver désordonnés ;
+- **Pas de contrôle de flux :** Aucun ajustement automatique du débit.
+
+Ces caractéristiques peuvent causer des sauts visuels ou des mouvements erratiques dans le jeu.
+
+### 6.2. Solution : État Complet et Design Stateless
+
+Pour mitiger ces problèmes, nous utilisons une stratégie de **transmission d'état complet** :
+
+- **Auto-suffisance des paquets :** Chaque `MSG_SERVER_STATE` contient l'état complet du jeu (50 octets) ;
+- **Pas de dépendance temporelle :** Un paquet perdu n'affecte pas les suivants ;
+- **Numérotation par tick :** Le client ignore les paquets avec un tick inférieur au dernier traité ;
+- **Récupération rapide :** L'état correct est restauré dès le prochain paquet.
+
+### 6.3. Gestion de la Connectivité
+
+Sans mécanisme de connexion TCP, nous avons implémenté :
+
+**Keepalive Client :** Envoi de `MSG_CLIENT_INPUT` minimum toutes les 1000ms.
+
+**Timeout Serveur :** Déconnexion après 5000ms sans message. Le serveur continue à broadcaster à 10 Hz pour informer l'autre joueur.
+
+**Reconnexion Transparente :** Un client peut se reconnecter automatiquement en envoyant `MSG_CLIENT_CONNECT`.
+
+### 6.4. Bande Passante
+
+**Consommation :**
+- Jeu actif : ~6 KB/s total (2 clients × 50 bytes × 60 Hz)
+- Attente : ~1 KB/s total (broadcast à 10 Hz)
 
 ---
 
@@ -184,19 +321,28 @@ Le délai introduit par le TCP rend le contrôle de la raquette moins réactif. 
 
 ### 7.2. Protocole UDP
 
-[Section à compléter par Matheus]
-
 **Caractéristiques de l'UDP :**
-[À compléter]
+- **Sans connexion :** Pas d'établissement de connexion (pas de handshake) ;
+- **Sans garantie de livraison :** Les paquets perdus ne sont pas retransmis ;
+- **Sans ordre garanti :** Les datagrammes peuvent arriver dans un ordre différent ;
+- **Pas de contrôle de flux :** Aucun mécanisme automatique de régulation du débit ;
+- **Overhead minimal :** En-tête de seulement 8 octets (vs 20+ pour TCP).
 
 **Avantages pour le jeu Pong :**
-[À compléter]
+- **Latence minimale :** Pas de délai dû aux ACK, handshakes ou retransmissions ;
+- **Pas de head-of-line blocking :** Un paquet perdu n'empêche pas le traitement des suivants ;
+- **Simplicité du protocole :** Communication directe sans gestion d'état de connexion ;
+- **Performance prévisible :** Pas de variations dues aux mécanismes de contrôle de congestion ;
+- **Fraîcheur des données :** Seul l'état le plus récent importe, les anciens paquets perdus sont sans conséquence.
 
 **Inconvénients pour les jeux temps réel :**
-[À compléter]
+- **Perte de paquets visible :** Sauts visuels si plusieurs paquets consécutifs sont perdus ;
+- **Complexité d'implémentation :** Nécessité d'implémenter ses propres mécanismes (keepalive, timeout, numérotation) ;
+- **Pas de garanties :** Le développeur doit gérer tous les cas de défaillance réseau ;
+- **Détection de déconnexion manuelle :** Obligation d'implémenter un système de timeout personnalisé.
 
 **Impact sur la jouabilité :**
-[À compléter]
+L'UDP offre une expérience nettement plus réactive que le TCP grâce à sa latence minimale. La perte occasionnelle de paquets (généralement < 1% sur réseaux locaux) est imperceptible car le prochain paquet contient l'état complet à jour. Le contrôle des raquettes est instantané et fluide, sans le délai perceptible observé avec TCP. Les rares artefacts visuels dus à la perte de paquets sont largement compensés par la réactivité globale supérieure.
 
 ---
 
@@ -278,7 +424,41 @@ pong-client-server/
 
 ### 9.3. Flux d'Exécution - UDP
 
-[Section à compléter par Matheus]
+#### Serveur
+
+1. Initialisation du socket UDP et bind sur le port 12345 ;
+2. Configuration du socket en mode non-bloquant (timeout de 1ms) ;
+3. Initialisation de la structure du jeu via `game_init()` ;
+4. Boucle principale :
+   - Réception des messages des clients (MSG_CLIENT_CONNECT, MSG_CLIENT_INPUT, MSG_CLIENT_DISCONNECT) ;
+   - Attribution des Player IDs (0 et 1) lors de la première connexion ;
+   - Démarrage de la simulation quand les deux joueurs sont connectés ;
+   - Mise à jour de l'état via `game_step()` à 60 Hz (si jeu démarré) ;
+   - Broadcast de l'état complet à tous les clients actifs (MSG_SERVER_STATE) ;
+   - Vérification des timeouts (5 secondes d'inactivité) ;
+   - Si jeu en pause : broadcast à 10 Hz pour informer du statut de connexion ;
+   - Sleep de 1ms pour éviter la surconsommation CPU.
+
+#### Client
+
+1. Création du socket UDP ;
+2. Configuration du socket en mode non-bloquant (timeout de 1ms) ;
+3. Configuration de l'adresse du serveur (IP + port 12345) ;
+4. Configuration du terminal en mode raw ;
+5. Envoi du message initial MSG_CLIENT_CONNECT avec Player ID ;
+6. Boucle principale :
+   - Capture de l'input clavier (non-bloquant) ;
+   - Détection de la touche Q pour quitter ;
+   - Envoi immédiat de MSG_CLIENT_INPUT si l'input change ;
+   - Envoi périodique de keepalive (toutes les 1000ms minimum) ;
+   - Réception des messages MSG_SERVER_STATE du serveur ;
+   - Mise à jour de l'état local avec les données reçues ;
+   - Rendu du jeu dans le terminal (avec affichage du statut de connexion) ;
+   - Sleep de 16ms (~60 FPS de rendu) ;
+7. En cas de sortie (Q pressé) :
+   - Envoi de MSG_CLIENT_DISCONNECT ;
+   - Fermeture du socket ;
+   - Restauration du mode normal du terminal.
 
 ### 9.4. Compilation et Exécution
 
@@ -288,50 +468,107 @@ pong-client-server/
 
 Toutes les commandes suivantes doivent être exécutées depuis la racine du projet (`pong-client-serveur/`).
 
-**Compilation :**
+#### Compilation
+
+**Compiler tout (TCP + UDP) :**
 ```bash
+make all
+# ou simplement
 make
 ```
 
-**Compilation du serveur TCP :**
+**Compiler uniquement TCP :**
 ```bash
-make server_tcp
+make tcp
 ```
 
-**Compilation des clients TCP :**
+**Compiler uniquement UDP :**
 ```bash
-make client_tcp
+make udp
 ```
 
-Les exécutables sont générés dans le répertoire `\bin`.
+**Compiler des composants individuels :**
+```bash
+make server_tcp    # Serveur TCP uniquement
+make client_tcp    # Client TCP uniquement
+make server_udp    # Serveur UDP uniquement
+make client_udp    # Client UDP uniquement
+```
 
-**Exécution du serveur TCP :**
+Les exécutables sont générés dans le répertoire `bin/`.
+
+#### Exécution - TCP
+
+**Serveur TCP (Terminal 1) :**
 ```bash
 make run_server_tcp
+# ou directement
+./bin/server_tcp 8080
 ```
 
-**Exécution des clients TCP (dans des terminaux séparés) :**
+**Clients TCP (Terminaux 2 et 3) :**
 ```bash
 make run_client_tcp
+# ou directement
+./bin/client_tcp 127.0.0.1 8080
 ```
 
-Par défaut, les clients se connectent au serveur à l’adresse `127.0.0.1:8080`.
+Par défaut, les clients se connectent au serveur à l'adresse `127.0.0.1:8080`.
 
-**Supression des exécutables générés :**
+#### Exécution - UDP
+
+**Serveur UDP (Terminal 1) :**
+```bash
+make run_server_udp
+# ou directement
+./bin/server_udp
+```
+Le serveur écoute par défaut sur le port 12345.
+
+**Client UDP - Joueur 1 (Terminal 2) :**
+```bash
+make run_client_udp
+# ou directement
+./bin/client_udp 127.0.0.1 0
+```
+
+**Client UDP - Joueur 2 (Terminal 3) :**
+```bash
+make run_client_udp_p2
+# ou directement
+./bin/client_udp 127.0.0.1 1
+```
+
+**Note :** Le Player ID (0 ou 1) doit être spécifié en ligne de commande pour l'UDP.
+
+#### Nettoyage
+
+**Supprimer les exécutables générés :**
 ```bash
 make clean
 ```
 
-**Nottoyage puis recompilation de tout :**
+**Nettoyage puis recompilation complète :**
 ```bash
 make re
 ```
 
+#### Structure des Binaires Générés
+
+```
+bin/
+├── server_tcp     # Serveur TCP
+├── client_tcp     # Client TCP
+├── server_udp     # Serveur UDP
+└── client_udp     # Client UDP
+```
 ---
 
 ## 10. Limitations du Projet
 
 Bien que le projet réponde aux exigences proposées, certaines limitations ont été consciemment acceptées dans le cadre académique :
+
+### Implémentation TCP
 
 **Protocole TCP :** Le TCP n'est pas idéal pour les jeux temps réel en raison de la latence additionnelle et du head-of-line blocking. Ces limitations sont inhérentes au protocole et impactent la réactivité du jeu.
 
@@ -339,10 +576,37 @@ Bien que le projet réponde aux exigences proposées, certaines limitations ont 
 
 **Synchronisation temporelle :** Il n'y a pas d'implémentation d'interpolation complète entre états. Le rendu est couplé à la fréquence de réception des paquets du serveur.
 
+### Implémentation UDP
+
+**Perte de paquets visible :** En cas de perte de plusieurs paquets consécutifs (conditions réseau dégradées), des sauts visuels peuvent apparaître. L'absence d'interpolation temporelle rend ces artefacts plus visibles.
+
+**Pas de prédiction côté client :** Contrairement à l'implémentation TCP, la version UDP n'utilise pas de client-side prediction. Bien que la latence de l'UDP soit naturellement plus faible, l'ajout de prédiction améliorerait encore la réactivité perçue.
+
+**Gestion simplifiée des erreurs :** Le système de keepalive et timeout est basique. Une implémentation production inclurait :
+- Détection plus fine des variations de latence (jitter) ;
+- Adaptation dynamique de la fréquence de broadcast selon les conditions réseau ;
+- Métriques de qualité de connexion affichées aux joueurs.
+
+**Bande passante non optimisée :** Bien que raisonnable (~6 KB/s), l'envoi de l'état complet à 60 Hz pourrait être optimisé via :
+- Compression des données (quantification des positions) ;
+- Delta compression (envoi uniquement des changements) ;
+- Priorisation des updates (balle vs raquettes).
+
+### Limitations Communes (TCP & UDP)
+
 **Scalabilité :** Support limité à seulement 2 joueurs. Il n'y a pas de système de matchmaking ou de lobby.
 
-Ces limitations sont assumées dans le contexte pédagogique du projet et pourraient être abordées dans des itérations futures avec des techniques plus avancées comme l'interpolation temporelle, le server reconciliation complet, ou l'optimisation de la bande passante.
+**Sécurité :** Aucune authentification des joueurs. Un client malveillant pourrait :
+- Usurper l'identité d'un autre joueur (spoofing d'adresse en UDP) ;
+- Envoyer des inputs invalides pour perturber le jeu ;
+- Se reconnecter avec différents Player IDs.
 
+**Robustesse réseau :** Pas de gestion de :
+- Reconnexion automatique après déconnexion involontaire (TCP) ;
+- Migration entre réseaux (changement d'IP) ;
+- NAT traversal pour jeu sur Internet.
+
+Ces limitations sont assumées dans le contexte pédagogique du projet et pourraient être abordées dans des itérations futures avec des techniques plus avancées comme l'interpolation temporelle, le lag compensation, le delta compression, ou des mécanismes de sécurité (authentification, encryption, anti-cheat).
 ---
 
 ## 11. Annexes
@@ -350,43 +614,62 @@ Ces limitations sont assumées dans le contexte pédagogique du projet et pourra
 ### A. Commandes de Compilation
 
 ```bash
-# Compiler tous les composants
+# Compiler tous les composants (TCP + UDP)
+make all
+# ou simplement
 make
 
-# Compiler uniquement le serveur TCP
-gcc -o server_tcp server_tcp.c game.c -Wall -Wextra
+# Compiler uniquement TCP
+make tcp
 
-# Compiler uniquement le client TCP
-gcc -o client_tcp client_tcp.c -Wall -Wextra
+# Compiler uniquement UDP
+make udp
 
-# Compiler uniquement le serveur UDP
-gcc -o server_udp server_udp.c game.c -Wall -Wextra
+# Compiler des composants individuels
+make server_tcp
+make client_tcp
+make server_udp
+make client_udp
 
-# Compiler uniquement le client UDP
-gcc -o client_udp client_udp.c -Wall -Wextra
+# Compilation manuelle (si nécessaire)
+
+# Serveur TCP
+gcc -o bin/server_tcp server/server_tcp.c server/game.c -Wall -Wextra -std=c11 -lm
+
+# Client TCP
+gcc -o bin/client_tcp client/client_tcp.c -Wall -Wextra -std=c11 -D_POSIX_C_SOURCE=200809L -lm
+
+# Serveur UDP
+gcc -o bin/server_udp server/server_udp.c server/game.c -Wall -Wextra -std=c11 -lm
+
+# Client UDP
+gcc -o bin/client_udp client/client_udp.c -Wall -Wextra -std=c11 -D_POSIX_C_SOURCE=200809L -lm
 
 # Nettoyer les binaires
 make clean
+
+# Nettoyer et recompiler
+make re
 ```
 
 ### B. Exemple de Session de Jeu - TCP
 
 ```bash
 # Terminal 1 - Serveur
-$ ./server_tcp
+$ make run_server_tcp
 Server listening on port 8080...
 Player 1 connected
 Player 2 connected
 Game starting...
 
 # Terminal 2 - Client 1 (Joueur 1)
-$ ./client_tcp
+$ make run_client_tcp
 Connected to server as Player 1
 [Jeu rendu en ASCII]
 Contrôles: W (haut) / S (bas)
 
 # Terminal 3 - Client 2 (Joueur 2)
-$ ./client_tcp
+$ make run_client_tcp
 Connected to server as Player 2
 [Jeu rendu en ASCII]
 Contrôles: W (haut) / S (bas)
@@ -394,7 +677,40 @@ Contrôles: W (haut) / S (bas)
 
 ### C. Exemple de Session de Jeu - UDP
 
-[Section à compléter par Matheus]
+```bash
+# Terminal 1 - Serveur
+$ make run_server_udp
+Pong server started on port 12345
+Waiting for players...
+Player 0 connected: 127.0.0.1:54321
+Player 1 connected: 127.0.0.1:54322
+Both players connected! Game starting...
+
+# Terminal 2 - Client 1 (Joueur 1 / Player 0)
+$ make run_client_udp
+Connecting to server 127.0.0.1:12345 as Player 1...
+PONG - Player 1
+Score: 0 - 0
+
+[Jeu rendu en ASCII]
+Controls: W/S to move | Q to quit
+
+# Terminal 3 - Client 2 (Joueur 2 / Player 1)
+$ make run_client_udp_p2
+Connecting to server 127.0.0.1:12345 as Player 2...
+PONG - Player 2
+Score: 0 - 0
+
+[Jeu rendu en ASCII]
+Controls: W/S to move | Q to quit
+
+# Simulation de déconnexion (Player 2 appuie sur Q)
+# Terminal 2 affiche:
+[Player 2 disconnected - Waiting for reconnection...]
+
+# Terminal 1 (Serveur) affiche:
+Player 1 disconnected
+```
 
 ---
 
