@@ -3,7 +3,7 @@
 ## Projet Académique - Réseaux Informatiques
 
 **Discipline :** Réseaux
-**Titre :** Implémentation du jeu Pong en Architecture Client-Serveur avec Analyse de la Latence  
+</br> **Titre :** Implémentation du jeu Pong en Architecture Client-Serveur avec Analyse de la Latence  
 **Dépôt :** [github.com/fcl2002/Pong-Client-Serveur](https://github.com/fcl2002/Pong-Client-Serveur/tree/main/pong-client-serveur)
 
 **Développeurs :**
@@ -22,12 +22,14 @@ Le projet a été développé en langage C, exécuté en environnement Linux (vi
 
 ## 2. Objectifs
 
-- Implémenter un jeu Pong en **architecture client–serveur** ;
-- Utiliser des **sockets TCP** pour une communication fiable ;
-- Utiliser des **sockets UDP** pour une communication non connectée ;
-- Gérer **plusieurs clients simultanément** ;
-- Analyser les échanges réseau avec **Wireshark** ;
-- Identifier et expliquer des **failles de sécurité potentielles**.
+- Implémenter un serveur et des clients sous Linux en utilisant des sockets TCP;
+- Implémenter un serveur et des clients sous Linux en utilisant des sockets UDP;
+- Modifier le serveur afin qu’il puisse accepter et gérer simultanément plusieurs
+clients ;
+- Capturer des traces d’exécution du jeu et analyser les échanges réseau à l’aide de
+l’outil Wireshark.
+- Identifier et analyser des vulnérabilités de sécurité potentielles dans l’implémenta
+tion.
 
 ---
 
@@ -375,23 +377,33 @@ L'UDP offre une expérience nettement plus réactive que le TCP grâce à sa lat
 ### 9.1. Structure des Fichiers
 
 ```
-pong-client-server/
+pong-client-serveur/
 │
-├── README.md
-├── Makefile
-│
-├── server/
-│   ├── server_tcp.c
-│   ├── server_udp.c
-│   ├── game.c            # Logique centrale du Pong (physique, collisions)
-│   └── game.h
+├── bin/                        # Binaires compilés
 │
 ├── client/
-│   ├── client_tcp.c
-│   └── client_udp.c
+│   ├── client_tcp.c            # Implémentation client TCP
+│   └── client_udp.c            # Implémentation client UDP
 │
-└── tests/
-    └── test-game.c       # Tests locaux sans réseau pour valider la logique
+├── server/
+│   ├── server_tcp.c            # Implémentation serveur TCP
+│   ├── server_udp.c            # Implémentation serveur UDP
+│   ├── game.c                  # Logique centrale du jeu
+│   └── game.h                  # Interface de la logique de jeu
+│
+├── tests/
+│   ├── test-game.c             # Tests unitaires de la logique
+│   ├── attack_control.py       # Script de test d'attaque
+│   └── attack_disconnect.py    # Script de test DoS
+│
+├── wireshark/                  # Captures réseau pour analyse
+│
+├── report/                     # Documentation et rapports
+│
+├── Makefile                    # Compilation automatisée
+├── README.md                   # Documentation générale
+├── LICENSE                     # Licence du projet
+└── .gitignore                  # Fichiers ignorés par git
 ```
 
 ### 9.2. Flux d'Exécution - TCP
